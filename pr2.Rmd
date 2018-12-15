@@ -1,0 +1,1246 @@
+---
+title: 'Project 2: Modeling and Evaluation'
+subtitle: "CSE6242 - Data and Visual Analytics - Summer 2018\n\nDue: Sunday, July 24, 2018 at 11:59 PM UTC-12:00 on T-Square"
+author: "nkarnati3@gatech.edu"
+output:
+  pdf_document: default
+  html_document:
+    code_folding: none
+    theme: default
+  html_notebook:
+    code_folding: none
+    theme: default
+---
+```{r global_options, include=FALSE}
+knitr::opts_chunk$set(warning=FALSE, message=FALSE)
+```
+# Data
+
+We will use the same dataset as Project 1: [`movies_merged`](https://s3.amazonaws.com/content.udacity-data.com/courses/gt-cs6242/project/movies_merged).
+
+# Objective
+
+Your goal in this project is to build a linear regression model that can predict the `Gross` revenue earned by a movie based on other variables. You may use R packages to fit and evaluate a regression model (no need to implement regression yourself). Please stick to linear regression, however.
+
+# Instructions
+
+You should be familiar with using an [RMarkdown](http://rmarkdown.rstudio.com) Notebook by now. Remember that you have to open it in RStudio, and you can run code chunks by pressing *Cmd+Shift+Enter*.
+
+Please complete the tasks below and submit this R Markdown file (as **pr2.Rmd**) containing all completed code chunks and written responses, and a PDF export of it (as **pr2.pdf**) which should include the outputs and plots as well.
+
+_Note that **Setup** and **Data Preprocessing** steps do not carry any points, however, they need to be completed as instructed in order to get meaningful results._
+
+# Setup
+
+Same as Project 1, load the dataset into memory:
+
+```{r}
+load('movies_merged')
+```
+
+This creates an object of the same name (`movies_merged`). For convenience, you can copy it to `df` and start using it:
+
+```{r}
+df = movies_merged
+cat("Dataset has", dim(df)[1], "rows and", dim(df)[2], "columns", end="\n", file="")
+colnames(df)
+```
+
+## Load R packages
+
+Load any R packages that you will need to use. You can come back to this chunk, edit it and re-run to load any additional packages later.
+
+```{r}
+library(ggplot2)
+library(GGally)
+library(tm)
+library(glmnet)
+library(plyr)
+```
+
+If you are using any non-standard packages (ones that have not been discussed in class or explicitly allowed for this project), please mention them below. Include any special instructions if they cannot be installed using the regular `install.packages('<pkg name>')` command.
+
+**Non-standard packages used**: None
+
+# Data Preprocessing
+
+Before we start building models, we should clean up the dataset and perform any preprocessing steps that may be necessary. Some of these steps can be copied in from your Project 1 solution. It may be helpful to print the dimensions of the resulting dataframe at each step.
+
+## 1. Remove non-movie rows
+
+```{r}
+# TODO: Remove all rows from df that do not correspond to movies
+df <- df[df$Type == "movie",]
+dim(df)
+
+```
+
+## 2. Drop rows with missing `Gross` value
+
+Since our goal is to model `Gross` revenue against other variables, rows that have missing `Gross` values are not useful to us.
+
+```{r}
+# TODO: Remove rows with missing Gross value
+df = na.omit(df)
+df = df[!is.na(df$Gross),]
+df = subset(df, df$Gross>0)
+
+```
+
+## 3. Exclude movies released prior to 2000
+
+Inflation and other global financial factors may affect the revenue earned by movies during certain periods of time. Taking that into account is out of scope for this project, so let's exclude all movies that were released prior to the year 2000 (you may use `Released`, `Date` or `Year` for this purpose).
+
+```{r}
+# TODO: Exclude movies released prior to 2000
+df = subset(df, df$Year>=2000)
+
+#Verifying the Date and Released fields too
+sum(df$Date<2000)
+
+Released = as.Date(df$Released, "%Y-%m-%d")
+Released = as.numeric(format(Released, "%Y"))
+sum(Released<2000, na.rm = T)
+
+#Therefore all movies with Year, Date and Released prior to 2000 are removed
+```
+
+## 4. Eliminate mismatched rows
+
+_Note: You may compare the `Released` column (string representation of release date) with either `Year` or `Date` (numeric representation of the year) to find mismatches. The goal is to avoid removing more than 10% of the rows._
+
+```{r}
+# TODO: Remove mismatched rows
+
+# Extract numeric Year from Released
+df$ReleasedYear = as.Date(df$Released, "%Y-%m-%d")
+df$ReleasedYear = as.numeric(format(df$ReleasedYear, "%Y"))
+
+# Check the NA's
+summary(df$Year)
+summary(df$ReleasedYear)
+summary(df$Gross)
+
+# to keep
+to.keep = round(0.9*nrow(df))
+to.keep
+
+# Step 1 - if all Year, Released are equal
+df$YearReleasedDiff = ifelse(df$Year == df$ReleasedYear, "Y", "N")
+summary(as.factor(df$YearReleasedDiff))
+
+# Step 2 - if all Year, Released are 1 year apart 
+df$YearReleasedDiff2 = ifelse(
+  (abs(df$Year-df$ReleasedYear)==1), "Y","N")
+summary(as.factor(df$YearReleasedDiff2))
+
+# Original dataset - no of Gross Records
+org.gross = nrow(df)
+org.gross
+
+# Filter out mismatch Year, Released Year using "YearReleasedDiff"
+df.Year.Released = subset(df, YearReleasedDiff=="Y")
+
+# Resultant rows
+nrow(df.Year.Released)
+
+# Update to keep
+to.keep = to.keep - nrow(df.Year.Released)
+to.keep
+
+# Filter out mismatch Year and Released Year using "YearReleasedDiff2"
+df.Year.Released2 = subset(df, YearReleasedDiff2=="Y")
+
+# Resultant rows
+nrow(df.Year.Released2)
+
+# Extract to.keep random rows from df.Year.Released2
+df.Year.Released2 = df.Year.Released2[sample(nrow(df.Year.Released2),to.keep),]
+
+# final df
+df = rbind(df.Year.Released, df.Year.Released2)
+
+# Percentage of mismatched records removed with gross value present
+print((org.gross-nrow(df))*100/org.gross)
+
+# Final rows - 90% of original rows
+nrow(df)
+
+df$ReleasedYear = NULL
+df$YearReleasedDiff = NULL
+df$YearReleasedDiff2 = NULL
+```
+
+## 5. Drop `Domestic_Gross` column
+
+`Domestic_Gross` is basically the amount of revenue a movie earned within the US. Understandably, it is very highly correlated with `Gross` and is in fact equal to it for movies that were not released globally. Hence, it should be removed for modeling purposes.
+
+```{r}
+# TODO: Exclude the `Domestic_Gross` column
+df$Domestic_Gross = NULL
+```
+
+## 6. Process `Runtime` column
+
+```{r}
+# TODO: Replace df$Runtime with a numeric column containing the runtime in minutes
+summary(df$Runtime)
+toNumeric = function(n){
+  strtoi(unlist(strsplit(df[n,"Runtime"], " "))[1])
+}
+
+get.seq = mapply(toNumeric, 1:nrow(df))
+df$Runtime = unlist(get.seq)
+summary(df$Runtime)
+
+```
+
+Perform any additional preprocessing steps that you find necessary, such as dealing with missing values or highly correlated columns (feel free to add more code chunks, markdown blocks and plots here as necessary).
+```{r echo=FALSE}
+
+ggpairs(df[, c("tomatoReviews","tomatoFresh","tomatoRotten","tomatoMeter","tomatoRating", "tomatoUserMeter", "tomatoUserRating", "tomatoUserReviews")], title = "Pairwise relationships between tomato ratings")
+
+ggpairs(df[, c("imdbVotes","imdbRating","tomatoMeter","tomatoRating",
+"tomatoUserMeter", "tomatoUserRating")],title = "Pairwise relationships between IMDB and tomato ratings")
+```
+
+From pr1, these are the features which are highly correlated (>0.6). 
+tomatoReviews ~ tomatoFresh ~ tomatoRotten
+tomatoMeter ~ tomatoRating ~tomatoUserMeter ~tomatoUserRating
+tomatoRating ~ tomatoUserMeter ~tomatoUserRating
+tomatoUserRating ~ tomatoUserMeter
+
+imdbRating ~ tomatoMeter ~tomatoRating ~tomatoUserMeter~tomatoUserRating
+
+Therefore just retaining tomatoReviews,tomatoUserReviews,imdbVotes and imdbRating and removing the rest rating features
+```{r}
+# TODO(optional): Additional preprocessing
+
+df$tomatoFresh = NULL
+df$tomatoRotten = NULL
+df$tomatoRating = NULL
+df$tomatoUserMeter = NULL
+df$tomatoUserRating = NULL
+
+```
+
+_**Note**: Do NOT convert categorical variables (like `Genre`) into binary columns yet. You will do that later as part of a model improvement task._
+
+## Final preprocessed dataset
+
+Report the dimensions of the preprocessed dataset you will be using for modeling and evaluation, and print all the final column names. (Again, `Domestic_Gross` should not be in this list!)
+
+```{r}
+# TODO: Print the dimensions of the final preprocessed dataset and column names
+dim(df)
+colnames(df)
+```
+
+# Evaluation Strategy
+
+In each of the tasks described in the next section, you will build a regression model. In order to compare their performance, you will compute the training and test Root Mean Squared Error (RMSE) at different training set sizes.
+
+First, randomly sample 10-20% of the preprocessed dataset and keep that aside as the **test set**. Do not use these rows for training! The remainder of the preprocessed dataset is your **training data**.
+
+Now use the following evaluation procedure for each model:
+
+- Choose a suitable sequence of training set sizes, e.g. 10%, 20%, 30%, ..., 100% (10-20 different sizes should suffice). For each size, sample that many inputs from the training data, train your model, and compute the resulting training and test RMSE.
+- Repeat your training and evaluation at least 10 times at each training set size, and average the RMSE results for stability.
+- Generate a graph of the averaged train and test RMSE values as a function of the train set size (%), with optional error bars.
+
+You can define a helper function that applies this procedure to a given set of features and reuse it.
+```{r}
+# Prepare test and train sets
+set.seed(0)
+shuffle = sample(nrow(df))
+test_size = round(0.2*nrow(df))
+train_size = nrow(df) - test_size
+
+df_test = df[shuffle[1:test_size],]
+df_train = df[shuffle[(test_size+1):(test_size+train_size)],]
+
+nrow(df_train)
+nrow(df_test)
+
+# Function to calculate root mean square error
+rmse = function(error)
+{
+  error = na.omit(error)
+  sqrt(mean(error^2))
+}
+
+# Function to train and test using lm
+model = function(train, model.formula, test){
+  m = lm(as.formula(model.formula), data=train)
+  theta = coef(m)
+  rmse_train = rmse(m$residuals) 
+  p = predict(m, test)
+  error = test$Gross - p
+  rmse_test = rmse(error)
+  list(rmse_train = rmse_train, rmse_test = rmse_test)
+}
+
+# Function to pass fraction of train data and complete test data to model function
+train_model = function(fraction, train, model.formula, test)
+{
+ set.seed(0)
+ shuffle = sample(nrow(train),nrow(train))
+ train = train[shuffle,]
+ train_fraction = train[1:round(fraction*nrow(train)),]
+ model(train_fraction, model.formula, test)
+}
+
+# To get training accuracy from above list of models  
+get.train = function(x, input)
+{
+  input[[x]]$rmse_train
+}
+
+# To get testing accuracy from above list of models
+get.test = function(x, input)
+{
+  input[[x]]$rmse_test
+}
+
+# To calculate mean rmse of all 10 runs of model
+get.mean = function(val){
+  colMeans(matrix(val, nrow = 10, ncol = 10))
+}
+
+# To calculate mean se of all 10 runs of model
+get.se = function(val){
+  m = matrix(val, nrow = 10, ncol = 10)
+  std.dev = apply(m, 2, sd)
+  std.dev/sqrt(10)
+}
+
+# Function to run 10%-100% training size data each 10 times and to calculate mean rmse and mean se   
+# and plot the graph of mean train and test rmse with error bars
+# Default formula is "Gross~."
+train_multiples = function(train, model.formula="Gross~.", test){
+  fraction = c(0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1)
+  fractions = rep(fraction, each=10)
+  l = lapply(fractions, train_model, train=train, model.formula=model.formula, test=test )
+  training.rmse = sapply(1:100, FUN=get.train, input=l)
+  testing.rmse = sapply(1:100, FUN=get.test, input=l)
+
+  train.rmse = get.mean(training.rmse)  
+  test.rmse = get.mean(testing.rmse)
+  
+  train.se = get.se(training.rmse)
+  test.se = get.se(testing.rmse)
+  
+  df1 = data.frame(fraction*100, train.rmse, test.rmse, train.se, test.se)
+  cols <- c("Train"="#3591d1","Test"="#f04546")
+  
+  # Plot training size vs. RMSE curve with error bars
+print(ggplot(df1, aes(df1$fraction)) + geom_line(aes(y=df1$train.rmse, colour="Train")) + geom_errorbar(aes(ymin=df1$train.rmse-df1$train.se, ymax=df1$train.rmse+df1$train.se, color="Train"), width=0.1)+geom_point(y=df1$train.rmse) + geom_line(aes(y=df1$test.rmse, colour="Test"))+geom_errorbar(aes(ymin=df1$test.rmse-df1$test.se, ymax=df1$test.rmse+df1$test.se, colour="Test"), width=0.1, )  + geom_point(y=df1$test.rmse)+ggtitle("Training size vs RMSE")+scale_colour_manual(name="RMSE",values=cols)+ylab("RMSE") + xlab("Training Size"))
+  rmse = min(test.rmse)
+  index = which.min(test.rmse)
+
+    list(best.rmse = rmse, best.index=index)
+}
+```
+
+# Tasks
+
+Each of the following tasks is worth 20 points, for a total of 100 points for this project. Remember to build each model as specified, evaluate it using the strategy outlined above, and plot the training and test errors by training set size (%).
+
+## 1. Numeric variables
+
+Use Linear Regression to predict `Gross` based on available _numeric_ variables. You can choose to include all or a subset of them.
+
+```{r}
+# TODO: Build & evaluate model 1 (numeric variables only)
+
+# Selecting numeric variables for train and test
+train_task1 = subset(df_train, select = c("Year","Runtime", "imdbRating", "imdbVotes",  
+                                    "tomatoMeter", "tomatoReviews", "tomatoUserReviews",
+                                    "Budget", "Gross"))
+test_task1 = subset(df_test, select = c("Year","Runtime", "imdbRating", "imdbVotes",  
+                                        "tomatoMeter", "tomatoReviews", "tomatoUserReviews",
+                                        "Budget", "Gross"))
+
+# Running the model for 10 training sizes 10 times each and calculating the mean
+set.seed(0)
+t1 = train_multiples(train=train_task1, test=test_task1)
+t1$best.index
+t1$best.rmse
+
+```
+
+**Q**: List the numeric variables you used.
+
+**A**: "Year","Runtime", "imdbRating", "imdbVotes", "tomatoMeter", "tomatoReviews", "tomatoUserReviews","Budget", "Gross"
+
+
+**Q**: What is the best mean test RMSE value you observed, and at what training set size?
+
+**A**: Best mean test RMSE value observed is 91509389 at 70% training set size
+
+## 2. Feature transformations
+
+Try to improve the prediction quality from **Task 1** as much as possible by adding feature transformations of the numeric variables. Explore both numeric transformations such as power transforms and non-numeric transformations of the numeric variables like binning (e.g. `is_budget_greater_than_3M`).
+
+```{r}
+# TODO: Build & evaluate model 2 (transformed numeric variables only)
+# Trial 1 with "Gross~(Year+Runtime+imdbRating+imdbVotes+tomatoMeter+  
+#tomatoReviews+tomatoUserReviews+Budget+Gross)^2" formula to run lm
+
+train_task2 = train_task1
+test_task2 = test_task1
+
+# Formula to run lm
+form = "Gross~(Year+Runtime+imdbRating+imdbVotes+tomatoMeter  
++tomatoReviews+tomatoUserReviews+Budget+Gross)^2"
+# Run
+set.seed(0)
+t2 = train_multiples(train=train_task2,model.formula =form, test=test_task2)
+t2$best.index
+t2$best.rmse
+
+# Trial 2 with "log(Gross)~(Year+Runtime+imdbRating+imdbVotes+  
+#tomatoMeter+tomatoReviews+tomatoUserReviews+Budget+Gross)^2"
+train_task2 = train_task1
+test_task2 = test_task1
+
+form = "log(Gross)~(Year+Runtime+imdbRating+imdbVotes+tomatoMeter+  
+tomatoReviews+tomatoUserReviews+Budget+Gross)^2"
+
+set.seed(0)
+t2 = train_multiples(train=train_task2,model.formula =form, test=test_task2)
+t2$best.index
+t2$best.rmse
+
+# Trial 3 with log of values and "log(Gross)~.",
+# "log(Gross)~(Year+Runtime+imdbRating+imdbVotes+tomatoMeter+  tomatoReviews+tomatoUserReviews+Budget+Gross)^2" 
+# and "Gross~." formulas
+train_task2 = train_task1
+test_task2 = test_task1
+
+# Calculating log of imdbVotes, tomatoUserReviews, Budget and Gross
+train_task2$imdbVotes = log(train_task2$imdbVotes)
+train_task2$tomatoUserReviews = log(train_task2$tomatoUserReviews)
+train_task2$Budget = log(train_task2$Budget)
+train_task2$Gross = log(train_task2$Gross)
+
+test_task2$imdbVotes = log(test_task2$imdbVotes)
+test_task2$tomatoUserReviews = log(test_task2$tomatoUserReviews)
+test_task2$Budget = log(test_task2$Budget)
+test_task2$Gross = log(test_task2$Gross)
+
+form1 = "log(Gross)~(Year+Runtime+imdbRating+imdbVotes  
++tomatoMeter+tomatoReviews+tomatoUserReviews+Budget+Gross)^2"
+
+set.seed(0)
+t2 = train_multiples(train=train_task2,model.formula =form1, test=test_task2)
+t2$best.index
+t2$best.rmse
+
+form2="log(Gross)~."
+set.seed(0)
+t2 = train_multiples(train=train_task2,model.formula =form2, test=test_task2)
+t2$best.index
+t2$best.rmse
+
+set.seed(0)
+t2 = train_multiples(train=train_task2, test=test_task2)
+t2$best.index
+t2$best.rmse
+
+# Trial 4 Using binning and transformation "Gross~." formula
+train_task2 = train_task1
+test_task2 = test_task1
+
+# Checking if budget is greater than 3million
+train_task2$Budget = ifelse(train_task2$Budget>3e6, 1,0)
+test_task2$Budget = ifelse(test_task2$Budget>3e6, 1,0)
+
+# Binning Train Runtime into 10 bins
+train_task2$Runtime<-cut(train_task2$Runtime,seq(min(train_task2$Runtime, na.rm = T)-1,  
+                                                 max(train_task2$Runtime, na.rm = T)+1,  
+                                                 (max(train_task2$Runtime, na.rm = T) -   
+                                                    min(train_task2$Runtime, na.rm = T)+2)/10),right=FALSE,labels=c(1:10))
+train_task2$Runtime<-as.numeric(train_task2$Runtime)
+
+# Binning Test Runtime into 10 bins
+test_task2$Runtime<-cut(test_task2$Runtime,seq(min(test_task2$Runtime, na.rm = T)-1,  
+                                               max(test_task2$Runtime, na.rm = T)+1,  
+                                               (max(test_task2$Runtime, na.rm = T) -   
+                                                  min(test_task2$Runtime, na.rm = T)+2)/10),right=FALSE,labels=c(1:10))
+test_task2$Runtime<-as.numeric(test_task2$Runtime)
+
+# Binning imdbVotes into 10 bins
+train_task2$imdbVotes<-cut(train_task2$imdbVotes,seq(min(train_task2$imdbVotes, na.rm=T)-1,  
+                                                     max(train_task2$imdbVotes, na.rm=T)+1,  (max(train_task2$imdbVotes, na.rm=T) - min(train_task2$imdbVotes, na.rm=T)+2)/10),right=FALSE,labels=c(1:10))
+train_task2$imdbVotes<-as.numeric(train_task2$imdbVotes)
+
+test_task2$imdbVotes<-cut(test_task2$imdbVotes,seq(min(test_task2$imdbVotes, na.rm=T)-1,  
+                                                   max(test_task2$imdbVotes, na.rm=T)+1,  
+                                                   (max(test_task2$imdbVotes, na.rm=T) - min(test_task2$imdbVotes, na.rm=T)+2)/10),right=FALSE,labels=c(1:10))
+test_task2$imdbVotes<-as.numeric(test_task2$imdbVotes)
+
+# Binning TomatoUserReviews into 10 bins
+train_task2$tomatoUserReviews<-cut(train_task2$tomatoUserReviews,seq(min(train_task2$tomatoUserReviews, na.rm=T)-1,  
+                                                                     max(train_task2$tomatoUserReviews, na.rm=T)+1,  
+                                                                     (max(train_task2$tomatoUserReviews, na.rm=T) - min(train_task2$tomatoUserReviews, na.rm=T)+2)/10),right=FALSE,labels=c(1:10))
+train_task2$tomatoUserReviews<-as.numeric(train_task2$tomatoUserReviews)
+
+test_task2$tomatoUserReviews<-cut(test_task2$tomatoUserReviews,seq(min(test_task2$tomatoUserReviews, na.rm=T)-1,  
+                                                                   max(test_task2$tomatoUserReviews, na.rm=T)+1,  
+                                                                   (max(test_task2$tomatoUserReviews, na.rm=T) - min(test_task2$tomatoUserReviews, na.rm=T)+2)/10),right=FALSE,labels=c(1:10))
+test_task2$tomatoUserReviews<-as.numeric(test_task2$tomatoUserReviews)
+
+set.seed(0)
+t2 = train_multiples(train=train_task2, test=test_task2)
+t2$best.index
+t2$best.rmse
+
+# Trial 5 with "Gross~." formula
+train_task2 = train_task1
+test_task2 = test_task1
+
+# Checking if budget is greater than 25 Million the median
+train_task2$Budget = ifelse(train_task2$Budget>25e6, 1,0)
+test_task2$Budget = ifelse(test_task2$Budget>25e6, 1,0)
+
+# Binning Runtime, imdbVotes, tomatoUserReviews
+train_task2$Runtime<-cut(train_task2$Runtime,seq(min(train_task2$Runtime, na.rm = T)-1,  
+                                                 max(train_task2$Runtime, na.rm = T)+1,  
+                                                 (max(train_task2$Runtime, na.rm = T) - min(train_task2$Runtime, na.rm = T)+2)/10),right=FALSE,labels=c(1:10))
+train_task2$Runtime<-as.numeric(train_task2$Runtime)
+
+test_task2$Runtime<-cut(test_task2$Runtime,seq(min(test_task2$Runtime, na.rm = T)-1,  
+                                               max(test_task2$Runtime, na.rm = T)+1,  
+                                               (max(test_task2$Runtime, na.rm = T) - min(test_task2$Runtime, na.rm = T)+2)/10),right=FALSE,labels=c(1:10))
+test_task2$Runtime<-as.numeric(test_task2$Runtime)
+
+train_task2$imdbVotes<-cut(train_task2$imdbVotes,seq(min(train_task2$imdbVotes, na.rm=T)-1,  
+                                                     max(train_task2$imdbVotes, na.rm=T)+1,  
+                                                     (max(train_task2$imdbVotes, na.rm=T) - min(train_task2$imdbVotes, na.rm=T)+2)/10),right=FALSE,labels=c(1:10))
+train_task2$imdbVotes<-as.numeric(train_task2$imdbVotes)
+
+test_task2$imdbVotes<-cut(test_task2$imdbVotes,seq(min(test_task2$imdbVotes, na.rm=T)-1,  
+                                                   max(test_task2$imdbVotes, na.rm=T)+1,  
+                                                   (max(test_task2$imdbVotes, na.rm=T) - min(test_task2$imdbVotes, na.rm=T)+2)/10),right=FALSE,labels=c(1:10))
+test_task2$imdbVotes<-as.numeric(test_task2$imdbVotes)
+
+train_task2$tomatoUserReviews<-cut(train_task2$tomatoUserReviews,seq(min(train_task2$tomatoUserReviews, na.rm=T)-1,  
+                                                                     max(train_task2$tomatoUserReviews, na.rm=T)+1,(max(train_task2$tomatoUserReviews, na.rm=T) - min(train_task2$tomatoUserReviews, na.rm=T)+2)/10),right=FALSE,labels=c(1:10))
+train_task2$tomatoUserReviews<-as.numeric(train_task2$tomatoUserReviews)
+
+test_task2$tomatoUserReviews<-cut(test_task2$tomatoUserReviews,seq(min(test_task2$tomatoUserReviews, na.rm=T)-1,  
+                                                                   max(test_task2$tomatoUserReviews, na.rm=T)+1,  
+                                                                   (max(test_task2$tomatoUserReviews, na.rm=T) - min(test_task2$tomatoUserReviews, na.rm=T)+2)/10),right=FALSE,labels=c(1:10))
+test_task2$tomatoUserReviews<-as.numeric(test_task2$tomatoUserReviews)
+
+set.seed(0)
+t2 = train_multiples(train = train_task2, test=test_task2)
+t2$best.index
+t2$best.rmse
+
+# Trial 6 Just binning the data with "log(Gross)~." formula
+train_task2 = train_task1
+test_task2 = test_task1
+
+train_task2$Runtime<-cut(train_task2$Runtime,seq(min(train_task2$Runtime, na.rm = T)-1,  
+                                                 max(train_task2$Runtime, na.rm = T)+1,  
+                                                 (max(train_task2$Runtime, na.rm = T) - min(train_task2$Runtime, na.rm = T)+2)/10),right=FALSE,labels=c(1:10))
+train_task2$Runtime<-as.numeric(train_task2$Runtime)
+
+test_task2$Runtime<-cut(test_task2$Runtime,seq(min(test_task2$Runtime, na.rm = T)-1,  
+                                               max(test_task2$Runtime, na.rm = T)+1,  
+                                               (max(test_task2$Runtime, na.rm = T) - min(test_task2$Runtime, na.rm = T)+2)/10),right=FALSE,labels=c(1:10))
+test_task2$Runtime<-as.numeric(test_task2$Runtime)
+
+train_task2$imdbVotes<-cut(train_task2$imdbVotes,seq(min(train_task2$imdbVotes, na.rm=T)-1,  
+                                                     max(train_task2$imdbVotes, na.rm=T)+1,  
+                                                     (max(train_task2$imdbVotes, na.rm=T) - min(train_task2$imdbVotes, na.rm=T)+2)/10),right=FALSE,labels=c(1:10))
+train_task2$imdbVotes<-as.numeric(train_task2$imdbVotes)
+
+test_task2$imdbVotes<-cut(test_task2$imdbVotes,seq(min(test_task2$imdbVotes, na.rm=T)-1,  
+                                                   max(test_task2$imdbVotes, na.rm=T)+1,  
+                                                   (max(test_task2$imdbVotes, na.rm=T) - min(test_task2$imdbVotes, na.rm=T)+2)/10),right=FALSE,labels=c(1:10))
+test_task2$imdbVotes<-as.numeric(test_task2$imdbVotes)
+
+train_task2$tomatoUserReviews<-cut(train_task2$tomatoUserReviews,seq(min(train_task2$tomatoUserReviews, na.rm=T)-1,  
+                                                                     max(train_task2$tomatoUserReviews, na.rm=T)+1,  
+                                                                     (max(train_task2$tomatoUserReviews, na.rm=T) - min(train_task2$tomatoUserReviews, na.rm=T)+2)/10),right=FALSE,labels=c(1:10))
+train_task2$tomatoUserReviews<-as.numeric(train_task2$tomatoUserReviews)
+
+test_task2$tomatoUserReviews<-cut(test_task2$tomatoUserReviews,seq(min(test_task2$tomatoUserReviews, na.rm=T)-1,  
+                                                                   max(test_task2$tomatoUserReviews, na.rm=T)+1,  
+                                                                   (max(test_task2$tomatoUserReviews, na.rm=T) - min(test_task2$tomatoUserReviews, na.rm=T)+2)/10),right=FALSE,labels=c(1:10))
+test_task2$tomatoUserReviews<-as.numeric(test_task2$tomatoUserReviews)
+
+form = "log(Gross)~."
+
+set.seed(0)
+t2 = train_multiples(train=train_task2,model.formula=form,test=test_task2)
+t2$best.index
+t2$best.rmse
+```
+
+**Q**: Explain which transformations you used and why you chose them.
+
+**A**: 
+Have tried following tranformations as each trial. 
+
+Trial 1: "Gross~(Year+Runtime+imdbRating+imdbVotes+tomatoMeter+tomatoReviews+tomatoUserReviews  
++Budget+Gross)^2"
+
+Best RMSE: 194981503
+
+Trial 2:  "log(Gross)~(Year+Runtime+imdbRating+imdbVotes+tomatoMeter+
+tomatoReviews+tomatoUserReviews  
++Budget+Gross)^2"
+
+Best RMSE: 195016126
+
+Trial 3: log of all imdbVotes, tomatoUserReviews, Budget and Gross features
+
+3.1  "log(Gross)~(Year+Runtime+imdbRating+imdbVotes
++tomatoMeter+tomatoReviews+  
+tomatoUserReviews+Budget+Gross)^2"
+
+Best RMSE:  14.49772
+
+3.2 "log(Gross)~."
+
+Best RMSE: 14.50211
+
+3.3 "Gross~."
+
+Best RMSE:  1.121244
+
+Trial 4: Binning of all (Budget>3M, Runtime, imdbVotes, tomatoUserReviews) and "Gross~."
+
+Best RMSE: 122094617
+
+Trial 5: Binning of all (Budget>25M, Runtime, imdbVotes, tomatoUserReviews) and "Gross~."
+
+Best RMSE: 118382774
+
+Trial 6: Binning of all (Runtime, imdbVotes, tomatoUserReviews) with "log(Gross)~."
+
+Best RMSE: 195016127
+
+These are choosen to figure out if the selected features are linear in transformed coordinate system. Different permutations of square of features, log of Gross, applying log to all features and gross and binning of budget with different values, binning of Runtime, tomatoUserReviews and imdbVotes is performed. 
+
+Binning of Budget, tomatoUserReviews, imdbVotes is chosen for their large values and runtime due to the generality of the feature. 
+Log is applied to the features as the values are large.
+
+Trial 3 - 3.3 found to be best resulting that the log of the features (imdbVotes, tomatoUserReviews, Budget and Gross) are linear using Gross~. lm formula.
+
+**Q**: How did the RMSE change compared to Task 1?
+
+**A**: The RMSE changed from 91509389 at 70% Training size to  1.121244 at 100% Training size. This is 81614162 times improvement in RMSE which is incredible. This happened with log transformation of all selected variables and Gross~. lm formula.
+
+
+## 3. Non-numeric variables
+
+Write code that converts genre, actors, directors, and other categorical variables to columns that can be used for regression (e.g. binary columns as you did in Project 1). Also process variables such as awards into more useful columns (again, like you did in Project 1). Now use these converted columns only to build your next model.
+
+```{r}
+# TODO: Build & evaluate model 3 (converted non-numeric variables only)
+
+# Choosing non numeric variables
+train_task3 = subset(df, select = c("Genre","Director","Actors", "Language", "Country","Awards",   
+                                    "Production","Gross"))
+
+# Get the numbers from Awards String
+train_task3$AwardsNum <- sapply(train_task3$Awards, 
+                                function(awards) as.numeric( unlist(
+                                  regmatches(awards, gregexpr("+[0-9]+", awards))[[1]]
+                                ) ) )
+train_task3$Wins = 0
+train_task3$Nominations = 0
+
+# Function to calculate no of wins and nominations from awards
+calc.train.awards = function(i){
+  
+  if(is.na(train_task3[i,]$Awards) || train_task3[i,]$Awards=="N/A")  
+  {
+    return()
+  }
+  
+  # split the awards string 
+  alist = strsplit(train_task3[i,]$Awards, " ")
+  
+  # Get indexes of win and won from alist
+  Won = grep("win",alist[[1]], value=FALSE, ignore.case=TRUE)
+  Won = c(Won, grep("Won",alist[[1]], value=FALSE, ignore.case=TRUE))
+  
+  # Get indexes of nominations/nominated or any such using regex nominat+
+  Nomination = grep("nominat+",alist[[1]], value=FALSE, ignore.case=TRUE)
+  
+  # sort the indexes
+  Won = sort(Won)
+  Nomination = sort(Nomination)
+  
+  k=1
+  l=1
+  
+  # for each number in awards, pick whether it belongs to win/nominated using smallest index from both vectors
+  for(j in 1:length(train_task3[i,]$AwardsNum[[1]])){
+    
+    if(k<=length(Won) & l<=length(Nomination))
+    {
+      if(Won[k]<Nomination[l])
+      {
+        train_task3[i,]$Wins = train_task3[i,]$Wins + as.numeric(train_task3[i,]$AwardsNum[[1]][j])       
+        k = k+1
+      }
+      else
+      {
+        train_task3[i,]$Nominations = train_task3[i,]$Nominations +  
+          as.numeric(train_task3[i,]$AwardsNum[[1]][j])          
+        l = l+1
+      }
+    } else if(k<=length(Won)) # If one of them is empty or exhausted
+    {
+      train_task3[i,]$Wins = train_task3[i,]$Wins + as.numeric(train_task3[i,]$AwardsNum[[1]][j])        
+      k = k+1
+    } else if(l<=length(Nomination)) # If one of them is empty or exhausted
+    {
+      train_task3[i,]$Nominations = train_task3[i,]$Nominations + as.numeric(train_task3[i,]$AwardsNum[[1]][j])          
+      l = l+1
+    }
+  }
+  train_task3[i,]
+}
+
+# Calculate Wins and Nominations
+train_task3 = adply(1:nrow(train_task3), calc.train.awards, .margins = 1)
+
+train_task3$X1 = NULL
+train_task3$AwardsNum = NULL
+# Remove Awards
+train_task3$Awards = NULL
+
+# Replace Genre with a collection of binary columns
+Genre = gsub(",", " ", train_task3$Genre)
+corp = Corpus(VectorSource(Genre))
+
+matrix = DocumentTermMatrix(corp)
+Genre.df = data.frame(as.matrix(matrix))
+
+# find top ten genre
+sorted.genre = sort(colSums(Genre.df), decreasing = TRUE)[1:10]
+
+other.Genre = rep(0,times=nrow(Genre.df))
+# Keep top 10 and make rest others
+for (entry in names(Genre.df)){
+  if(!(entry %in% names(sorted.genre)))
+  {
+    other.Genre = ifelse(other.Genre | Genre.df[,entry], 1,0)
+    Genre.df[,entry] = NULL
+  }
+}
+
+Genre.df$other.Genre = other.Genre
+
+train_task3 = cbind(train_task3, Genre.df)
+train_task3$Genre = NULL
+
+# Replace Director with a collection of binary columns
+Director = gsub(",", " ", train_task3$Director)
+corp = Corpus(VectorSource(Director))
+
+matrix = DocumentTermMatrix(corp)
+Director.df = data.frame(as.matrix(matrix))
+
+# find top 10 directors
+sorted.director = sort(colSums(Director.df), decreasing = TRUE)[1:10]
+
+other.director = rep(0,times=nrow(Director.df))
+# Keep top 10 and make rest others
+for (entry in names(Director.df)){
+  if(!(entry %in% names(sorted.director)))
+  {
+    other.director = ifelse(other.director | Director.df[,entry], 1,0)
+    Director.df[,entry] = NULL
+  }
+}
+names(Director.df) = paste(names(Director.df),".Director")
+
+Director.df$other.director = other.director
+
+train_task3 = cbind(train_task3, Director.df)
+train_task3$Director = NULL
+
+# Replace Actors with a collection of binary columns
+Actors = gsub(",", " ", train_task3$Actors)
+corp = Corpus(VectorSource(Actors))
+
+matrix = DocumentTermMatrix(corp)
+Actors.df = data.frame(as.matrix(matrix))
+
+# find top 10 actors
+sorted.actor = sort(colSums(Actors.df), decreasing = TRUE)[1:10]
+
+other.actor = rep(0,times=nrow(Actors.df))
+
+# Keep top 10 and make rest others
+for (entry in names(Actors.df)){
+  if(!(entry %in% names(sorted.actor)))
+  {
+    other.actor = ifelse(other.actor | Actors.df[,entry], 1,0)
+    Actors.df[,entry] = NULL
+  }
+}
+names(Actors.df) = paste(names(Actors.df),".Actor")
+
+Actors.df$other.actor = other.actor
+
+train_task3 = cbind(train_task3, Actors.df)
+train_task3$Actors = NULL
+
+# Replace Language with a collection of binary columns
+Language = gsub(",", " ", train_task3$Language)
+corp = Corpus(VectorSource(Language))
+
+matrix = DocumentTermMatrix(corp)
+Language.df = data.frame(as.matrix(matrix))
+
+# find top 5 languages
+sorted.language = sort(colSums(Language.df), decreasing = TRUE)[1:5]
+
+other.Language = rep(0,times=nrow(Language.df))
+
+# Keep top 5 and make rest others
+for (entry in names(Language.df)){
+  if(!(entry %in% names(sorted.language)))
+  {
+    other.Language = ifelse(other.Language | Language.df[,entry], 1,0)
+    Language.df[,entry] = NULL
+  }
+}
+names(Language.df) = paste(names(Language.df),".Language")
+
+Language.df$other.Language = other.Language
+
+train_task3 = cbind(train_task3, Language.df)
+train_task3$Language = NULL
+
+# Replace Country with a collection of binary columns
+Country = gsub(",", " ", train_task3$Country)
+corp = Corpus(VectorSource(Country))
+
+matrix = DocumentTermMatrix(corp)
+Country.df = data.frame(as.matrix(matrix))
+
+# find top 5 countries
+sorted.country = sort(colSums(Country.df), decreasing = TRUE)[1:5]
+other.country = rep(0,times=nrow(Country.df))
+
+# Keep top 5 and make rest others
+for (entry in names(Country.df)){
+  if(!(entry %in% names(sorted.country)))
+  {
+    other.country = ifelse(other.country | Country.df[,entry], 1,0)
+    Country.df[,entry] = NULL
+  }
+}
+names(Country.df) = paste(names(Country.df),".Country")
+
+Country.df$other.country = other.country
+
+train_task3 = cbind(train_task3, Country.df)
+train_task3$Country = NULL
+
+# Replace Production with a collection of binary columns
+Production = gsub(",", " ", train_task3$Production)
+corp = Corpus(VectorSource(Production))
+
+matrix = DocumentTermMatrix(corp)
+Production.df = data.frame(as.matrix(matrix))
+
+# find top 10 Productions
+sorted.production = sort(colSums(Production.df), decreasing = TRUE)[1:10]
+other.production = rep(0,times=nrow(Production.df))
+
+# Keep top 10 and make rest others
+for (entry in names(Production.df)){
+  if(!(entry %in% names(sorted.production)))
+  {
+    other.production = ifelse(other.production | Production.df[,entry], 1,0)
+    Production.df[,entry] = NULL
+  }
+}
+names(Production.df) = paste(names(Production.df),".Production")
+Production.df$other.production = other.production
+
+train_task3 = cbind(train_task3, Production.df)
+train_task3$Production = NULL
+
+test_task3 = train_task3[shuffle[1:test_size],]
+train_task3 = train_task3[shuffle[(test_size+1):(test_size+train_size)],]
+
+# Run
+set.seed(0)
+t3 = train_multiples(train=train_task3,test=test_task3)
+t3$best.index
+t3$best.rmse
+```
+
+**Q**: Explain which categorical variables you used, and how you encoded them into features.
+
+**A**: Categorical variables used are : ("Genre","Director","Actors", "Language", "Country","Awards", "Production","Gross")
+
+First, number of wins and nominations are extracted from Awards as new features.
+
+The numbers in the Awards string are extracted first. Then for each award, NA or N/A are considered as invalid wins or nominations. Indexes of "win" "won" and "nominat+" regex in the Awards string are extracted and are sorted. Then for each number in the awards correponding win/nomination is decided based on the sorted order of indexes extracted.
+Eg: Nominated for 2 Oscars. Another 3 wins & 4 nominations.
+
+AwardsNum = [2,3,4] //Values
+Wins = [7] //Index
+Nominations = [1,10] //Index
+Then first number 2 corresponds to least index 1 thus is a nomination and it belongs to 'Nominated', second value 3 corresponds to next higher index 7, and hence is a win and it belongs to 'wins' and next value 4 for next higher index 10 which belongs to 'nominations'. Therefore total nominations are 2+4=6 and wins are 3.
+
+Then, Genre is converted into one hot encoding and top 10 genres are selected and retained. Rest Genres are made into one category of "other.genre"" by performing "Logical OR" of the rest genre columns. And similar method is used to encode top 10 directors, top 10 Actors, top 5 languages, top 5 countries and top 10 productions. Only top 5 languagues and countries are chosen as it was determined that ENGLISH and USA are the most frequent language and country in project 1.
+
+**Q**: What is the best mean test RMSE value you observed, and at what training set size? How does this compare with Task 2?
+
+**A**: Best mean test RMSE observed was 161856522 at 100% Training Size. This is 144354415 times higher than the best RMSE value(1.121244) achieved in task 2. This shows a tremendous increase in the RMSE values.
+
+## 4. Numeric and categorical variables
+
+Try to improve the prediction quality as much as possible by using both numeric and non-numeric variables from **Tasks 2 & 3**.
+
+```{r}
+# TODO: Build & evaluate model 4 (numeric & converted non-numeric variables)
+train_task2 = train_task1
+test_task2 = test_task1
+
+# Getting log values of imdbVotes, tomatoUserReviews, Budget, Gross of task2 features as it has performed best 
+train_task2$imdbVotes = log(train_task2$imdbVotes)
+train_task2$tomatoUserReviews = log(train_task2$tomatoUserReviews)
+train_task2$Budget = log(train_task2$Budget)
+train_task2$Gross = log(train_task2$Gross)
+
+test_task2$imdbVotes = log(test_task2$imdbVotes)
+test_task2$tomatoUserReviews = log(test_task2$tomatoUserReviews)
+test_task2$Budget = log(test_task2$Budget)
+test_task2$Gross = log(test_task2$Gross)
+
+# Combining Task 3 and Task 2 data to get task4 data
+train_task4 = cbind(train_task3, train_task2)
+test_task4 = cbind(test_task3, test_task2)
+
+# Removing duplicate Gross feature from task 2 and task 3 data
+train_task4$Gross=NULL
+test_task4$Gross = NULL
+
+train_task4 =na.omit(train_task4)
+test_task4 = na.omit(test_task4)
+
+# Trial 1 Default model
+set.seed(0)
+t4 = train_multiples(train=train_task4,test=test_task4)
+t4$best.index
+t4$best.rmse
+
+# Trial 2 "log(Gross)~. 
+set.seed(0)
+form = "log(Gross)~."
+t4 = train_multiples(train=train_task4,model.formula=form,test=test_task4)
+t4$best.index
+t4$best.rmse
+
+# Trial 3 - comparing lm and Ridge Regression
+train_task4_t3 = na.omit(train_task4)
+test_task4_t3 = na.omit(test_task4)
+
+# Default lm
+set.seed(0)
+t4 = train_multiples(train=train_task4_t3,test=test_task4_t3)
+t4$best.index
+t4$best.rmse
+
+train = rbind(train_task4_t3, test_task4_t3)
+
+tsize = nrow(train_task4_t3)
+ttsize = nrow(test_task4_t3)
+
+x <- model.matrix(Gross~., train)[,-67]
+y <- train$Gross
+
+lambda <- 10^seq(10, -2, length = 100)
+
+# Ridge regression model
+ridge.mod <- glmnet(x[1:tsize,], y[1:tsize], alpha = 0, lambda = lambda)
+
+#find the best lambda from our list via cross-validation
+cv.out <- cv.glmnet(x[(tsize+1):nrow(x),], y[(tsize+1):nrow(x)], alpha = 0)
+bestlam <- cv.out$lambda.min
+
+#make predictions
+ridge.pred <- predict(ridge.mod, s = bestlam, newx = x[(tsize+1):(tsize+ttsize),])
+
+#check MSE
+mean((ridge.pred-y[(tsize+1):(tsize+ttsize)])^2)
+```
+
+**Q**: Compare the observed RMSE with Tasks 2 & 3.
+
+**A**: Best RMSE model from task 2 is selected. It has log applied to imdbVotes, Budget, tomatoUserReviews and Gross. It is compiled with Task 3 data.
+
+Trial 1: Default model of "Gross~." is run. It resulted 1.062583 at 90% training size. 
+
+Trial 2:   "log(Gross)~." model is run. Resulted 14.63623 at 40% training size. 
+
+Trial 3: Ridge Regression is performed and compared with lm default model. For ridge regression, best lambda value is selected using cross validation.
+Ridge regression has produced  1.460134 RMSE compared with 1.062583 of lm model.
+
+
+Therefore, comparing task 2 and 3 RMSEs, 161856522 of task 3 is 152323651 times greater than the 1.062583 of task 4 ridge regression and lm models. 
+1.121244 RMSE of task 2 is similar to task 4 ridge regression and lm models.
+This shows that numeric variables only have a greater impact on the model RMSE. That means, numeric variables are determining the Gross value of a movie.
+
+## 5. Additional features
+
+Now try creating additional features such as interactions (e.g. `is_genre_comedy` x `is_budget_greater_than_3M`) or deeper analysis of complex variables (e.g. text analysis of full-text columns like `Plot`).
+
+```{r}
+# TODO: Build & evaluate model 5 (numeric, non-numeric and additional features)
+
+train_task5 = cbind(train_task1, train_task3)
+test_task5 = cbind(test_task1, test_task3)
+
+train_task5 = na.omit(train_task5)
+test_task5 = na.omit(test_task5)
+
+train = rbind(train_task5, test_task5)
+
+# Trial 1 - just the numeric and non-numeric features
+set.seed(0)
+t5 = train_multiples(train=train[1:nrow(train_task5),], test=train[(nrow(train_task5)+1):(nrow(train)),])
+t5$best.index
+t5$best.rmse
+
+# Trial 2
+# Interactions with median of budget and  Genre
+train$isBudgetbelow25M.Comedy = ifelse(train$Budget<25e6 & train$comedy==1, 1,0)
+train$isBudgetabove25M.Comedy = ifelse(train$Budget>=25e6 & train$comedy==1, 1,0)
+
+train$isBudgetbelow25M.Romance = ifelse(train$Budget<25e6 & train$romance==1, 1,0)
+train$isBudgetabove25M.Romance = ifelse(train$Budget>=25e6 & train$romance==1, 1,0)
+
+train$isBudgetbelow25M.Action = ifelse(train$Budget<25e6 & train$action==1, 1,0)
+train$isBudgetabove25M.Action = ifelse(train$Budget>=25e6 & train$action==1, 1,0)
+
+train$isBudgetbelow25M.Adventure = ifelse(train$Budget<25e6 & train$adventure==1, 1,0)
+train$isBudgetabove25M.Adventure = ifelse(train$Budget>=25e6 & train$adventure==1, 1,0)
+
+train$isBudgetbelow25M.Drama = ifelse(train$Budget<25e6 & train$drama==1, 1,0)
+train$isBudgetabove25M.Drama = ifelse(train$Budget>=25e6 & train$drama==1, 1,0)
+
+train$isBudgetbelow25M.Crime = ifelse(train$Budget<25e6 & train$crime==1, 1,0)
+train$isBudgetabove25M.Crime = ifelse(train$Budget>=25e6 & train$crime==1, 1,0)
+
+train$isBudgetbelow25M.Fantasy = ifelse(train$Budget<25e6 & train$fantasy==1, 1,0)
+train$isBudgetabove25M.Fantasy = ifelse(train$Budget>=25e6 & train$fantasy==1, 1,0)
+
+train$isBudgetbelow25M.Horror = ifelse(train$Budget<25e6 & train$horror==1, 1,0)
+train$isBudgetabove25M.Horror = ifelse(train$Budget>=25e6 & train$horror==1, 1,0)
+
+train$isBudgetbelow25M.Thriller = ifelse(train$Budget<25e6 & train$thriller==1, 1,0)
+train$isBudgetabove25M.Thriller = ifelse(train$Budget>=25e6 & train$thriller==1, 1,0)
+
+train$isBudgetbelow25M.Mystery = ifelse(train$Budget<25e6 & train$mystery==1, 1,0)
+train$isBudgetabove25M.Mystery = ifelse(train$Budget>=25e6 & train$mystery==1, 1,0)
+
+train$isBudgetbelow25M.otherGenre = ifelse(train$Budget<25e6 & train$other.Genre==1, 1,0)
+train$isBudgetabove25M.otherGenre = ifelse(train$Budget>=25e6 & train$other.Genre==1, 1,0)
+
+# Interactions with median of imdbVotes and  Genre
+train$isVotesbelowM.Comedy = ifelse(train$imdbVotes<median(train$imdbVotes) & train$comedy==1, 1,0)
+train$isVotesaboveM.Comedy = ifelse(train$imdbVotes>=median(train$imdbVotes) & train$comedy==1, 1,0)
+
+train$isVotesbelowM.Romance = ifelse(train$imdbVotes<median(train$imdbVotes) & train$romance==1, 1,0)
+train$isVotesaboveM.Romance = ifelse(train$imdbVotes>=median(train$imdbVotes) & train$romance==1, 1,0)
+
+train$isVotesbelowM.Action = ifelse(train$imdbVotes<median(train$imdbVotes) & train$action==1, 1,0)
+train$isVotesaboveM.Action = ifelse(train$imdbVotes>=median(train$imdbVotes) & train$action==1, 1,0)
+
+train$isVotesbelowM.Adventure = ifelse(train$imdbVotes<median(train$imdbVotes) & train$adventure==1, 1,0)
+train$isVotesaboveM.Adventure = ifelse(train$imdbVotes>=median(train$imdbVotes) & train$adventure==1, 1,0)
+
+train$isVotesbelowM.Drama = ifelse(train$imdbVotes<median(train$imdbVotes) & train$drama==1, 1,0)
+train$isVotesaboveM.Drama = ifelse(train$imdbVotes>=median(train$imdbVotes) & train$drama==1, 1,0)
+
+train$isVotesbelowM.Crime = ifelse(train$imdbVotes<median(train$imdbVotes) & train$crime==1, 1,0)
+train$isVotesaboveM.Crime = ifelse(train$imdbVotes>=median(train$imdbVotes) & train$crime==1, 1,0)
+
+train$isVotesbelowM.Fantasy = ifelse(train$imdbVotes<median(train$imdbVotes) & train$fantasy==1, 1,0)
+train$isVotesaboveM.Fantasy = ifelse(train$imdbVotes>=median(train$imdbVotes) & train$fantasy==1, 1,0)
+
+train$isVotesbelowM.Horror = ifelse(train$imdbVotes<median(train$imdbVotes) & train$horror==1, 1,0)
+train$isVotesaboveM.Horror = ifelse(train$imdbVotes>=median(train$imdbVotes) & train$horror==1, 1,0)
+
+train$isVotesbelowM.Thriller = ifelse(train$imdbVotes<median(train$imdbVotes) & train$thriller==1, 1,0)
+train$isVotesaboveM.Thriller = ifelse(train$imdbVotes>=median(train$imdbVotes) & train$thriller==1, 1,0)
+
+train$isVotesbelowM.Mystery = ifelse(train$imdbVotes<median(train$imdbVotes) & train$mystery==1, 1,0)
+train$isVotesaboveM.Mystery = ifelse(train$imdbVotes>=median(train$imdbVotes) & train$mystery==1, 1,0)
+
+train$isVotesbelowM.otherGenre = ifelse(train$imdbVotes<median(train$imdbVotes) & train$other.Genre==1, 1,0)
+train$isVotesaboveM.otherGenre = ifelse(train$imdbVotes>=median(train$imdbVotes) & train$other.Genre==1, 1,0)
+
+# Interactions with median of tomatoUserReviews and  Genre
+train$isReviewsbelowM.Comedy = ifelse(train$tomatoUserReviews<median(train$tomatoUserReviews) &  
+                                        train$comedy==1, 1,0)
+train$isReviewsaboveM.Comedy = ifelse(train$tomatoUserReviews>=median(train$tomatoUserReviews) & 
+                                        train$comedy==1, 1,0)
+
+train$isReviewsbelowM.Romance = ifelse(train$tomatoUserReviews<median(train$tomatoUserReviews) &  
+                                         train$romance==1, 1,0)
+train$isReviewsaboveM.Romance = ifelse(train$tomatoUserReviews>=median(train$tomatoUserReviews) &  
+                                         train$romance==1, 1,0)
+
+train$isReviewsbelowM.Action = ifelse(train$tomatoUserReviews<median(train$tomatoUserReviews) &  
+                                        train$action==1, 1,0)
+train$isReviewsaboveM.Action = ifelse(train$tomatoUserReviews>=median(train$tomatoUserReviews) &  
+                                        train$action==1, 1,0)
+
+train$isReviewsbelowM.Adventure = ifelse(train$tomatoUserReviews<median(train$tomatoUserReviews) &  
+                                           train$adventure==1, 1,0)
+train$isReviewsaboveM.Adventure = ifelse(train$tomatoUserReviews>=median(train$tomatoUserReviews) &  
+                                           train$adventure==1, 1,0)
+
+train$isReviewsbelowM.Drama = ifelse(train$tomatoUserReviews<median(train$tomatoUserReviews) &  
+                                       train$drama==1, 1,0)
+train$isReviewsaboveM.Drama = ifelse(train$tomatoUserReviews>=median(train$tomatoUserReviews) &  
+                                       train$drama==1, 1,0)
+
+train$isReviewsbelowM.Crime = ifelse(train$tomatoUserReviews<median(train$tomatoUserReviews) &  
+                                       train$crime==1, 1,0)
+train$isReviewsaboveM.Crime = ifelse(train$tomatoUserReviews>=median(train$tomatoUserReviews) &  
+                                       train$crime==1, 1,0)
+
+train$isReviewsbelowM.Fantasy = ifelse(train$tomatoUserReviews<median(train$tomatoUserReviews) &  
+                                         train$fantasy==1, 1,0)
+train$isReviewsaboveM.Fantasy = ifelse(train$tomatoUserReviews>=median(train$tomatoUserReviews) &  
+                                         train$fantasy==1, 1,0)
+
+train$isReviewsbelowM.Horror = ifelse(train$tomatoUserReviews<median(train$tomatoUserReviews) &  
+                                        train$horror==1, 1,0)
+train$isReviewsaboveM.Horror = ifelse(train$tomatoUserReviews>=median(train$tomatoUserReviews) &  
+                                        train$horror==1, 1,0)
+
+train$isReviewsbelowM.Thriller = ifelse(train$tomatoUserReviews<median(train$tomatoUserReviews) &  
+                                          train$thriller==1, 1,0)
+train$isReviewsaboveM.Thriller = ifelse(train$tomatoUserReviews>=median(train$tomatoUserReviews) &  
+                                          train$thriller==1, 1,0)
+
+train$isReviewsbelowM.Mystery = ifelse(train$tomatoUserReviews<median(train$tomatoUserReviews) &  
+                                         train$mystery==1, 1,0)
+train$isReviewsaboveM.Mystery = ifelse(train$tomatoUserReviews>=median(train$tomatoUserReviews) &  
+                                         train$mystery==1, 1,0)
+
+train$isReviewsbelowM.otherGenre = ifelse(train$tomatoUserReviews<median(train$tomatoUserReviews) &  
+                                            train$other.Genre==1, 1,0)
+train$isReviewsaboveM.otherGenre = ifelse(train$tomatoUserReviews>=median(train$tomatoUserReviews) &  
+                                            train$other.Genre==1, 1,0)
+
+set.seed(0)
+t5 = train_multiples(train=train[1:nrow(train_task5),], test=train[(nrow(train_task5)+1):(nrow(train)),])
+t5$best.index
+t5$best.rmse
+
+# Trial 3 Removing original features 
+train1 = train
+train$imdbVotes = NULL
+train$tomatoUserReviews = NULL
+train$Budget = NULL
+train$comedy = NULL
+train$romance = NULL
+train$action = NULL
+train$adventure = NULL
+train$drama = NULL
+train$crime = NULL
+train$fantasy = NULL
+train$horror = NULL
+train$thriller = NULL
+train$mystery = NULL
+train$other.Genre = NULL
+
+set.seed(0)
+t5 = train_multiples(train=train[1:nrow(train_task5),], test=train[(nrow(train_task5)+1):(nrow(train)),])
+t5$best.index
+t5$best.rmse
+
+# Trial 4 Out of curiosity, model with just imdbVotes, tomatoUserReviews and Budget
+train_task5 = train_task1
+test_task5 = test_task1
+
+train_task5$imdbVotes = log(train_task5$imdbVotes)
+train_task5$tomatoUserReviews = log(train_task5$tomatoUserReviews)
+train_task5$Budget = log(train_task5$Budget)
+train_task5$Gross = log(train_task5$Gross)
+
+test_task5$imdbVotes = log(test_task5$imdbVotes)
+test_task5$tomatoUserReviews = log(test_task5$tomatoUserReviews)
+test_task5$Budget = log(test_task5$Budget)
+test_task5$Gross = log(test_task5$Gross)
+
+set.seed(0)
+t5 = train_multiples(train=train_task5, test=train_task5)
+t5$best.index
+t5$best.rmse
+```
+
+**Q**: Explain what new features you designed and why you chose them.
+
+**A**: 
+Trial 1:
+
+Just with numeric variables from task 1 and non numeric variables from task 3, best RMSE of 98963778 is achieved at 80% training size.
+
+Trial 2:
+
+Along with numeric variables from task 1, non numeric variabes from task 3, following interactions are chosen.
+
+For each Genre including other.Genre, interactions with Budget, imdbVotes, tomatoUserReviews are created. Here, each genre is checked if Budget, imdbVotes, tomatoUserReviews are above and below their corresponding medians.
+
+Budget, imdbVotes and tomatoUserReviews are chosen as they are they have a wide range of values and they played a great role in reducing the RMSE value when operated with log in Task 2 - Trial 3. As the values are big, tried to split them at median and coupled with Genre and new interaction columns are added which resulted in 99116397 RMSE at 80% training size. 
+
+This shows that the interactions have contributed to the increased RMSE. 
+
+Trial 3:
+
+Original Genre, imdbVotes, tomatoUserReviews and Budget fields are removed and tried. It contributed to 137838987 RMSE which is high.
+
+Trial 4:
+
+From the Task 2, Trial 3, instead of picking all numeric variables, just imdbVotes, tomatoUserReviews, Budget are selected. 
+
+All values are log transformed including Gross.
+Then Gross ~ imdbVotes+tomatoUserReviews+Budget resulted in 1.147339 best RMSE at 100% training size.
+
+This revealed a hidden secret of the underlying model. This shows that just the imdbVotes, romatoUserReviews and Budget can be used to predict the Gross value of the movie. That is the budget spent and the people opinion matters and none of the attributes like actor, director, writer or production have an impact on the gross value prediction.
+
+**Q**: Comment on the final RMSE values you obtained, and what you learned through the course of this project.
+
+**A**: Through interactions, RMSE of 99116397 is achieved. And through the trial 4, hidden model with just imdbVotes, romatoUserReviews and Budget features, best RMSE of 1.147339 is obtained.
+
+I learnt the following things through the course of this project.
+
+1. Making hands dirty with data. Now handling data has become easy. There is easy flow of hands to type the code.
+
+2. Easily able to identify the errors and fixes.
+
+3. Writing modular codes and generalizing code as functions.
+
+4. Parallelizing code using plyr package and apply functions.
+
+5. Plotting various types of graphs using error bars etc.
+
+6. lm function usage with various formulas
+
+7. Regression models usage (Ridge Regression)
+
+8. Manipulation of data
+
+9. Analysis of data, finding underlying trends and interesting facts
